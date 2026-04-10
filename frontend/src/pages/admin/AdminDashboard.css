@@ -1,0 +1,188 @@
+/* AdminDashboard.css */
+.ad-root {
+  display: flex;
+  min-height: 100vh;
+  background: #f8fafc;
+  color: #1e293b;
+  font-family: 'Inter', sans-serif;
+}
+
+/* Sidebar */
+.ad-sidebar {
+  width: 260px;
+  background: white;
+  border-right: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+.ad-brand {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: #2563eb;
+  margin-bottom: 32px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ad-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.ad-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 500;
+  text-align: left;
+}
+
+.ad-nav-item:hover {
+  background: #f1f5f9;
+  color: #2563eb;
+}
+
+.ad-nav-active {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.ad-logout {
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  color: #ef4444;
+  background: #fef2f2;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+/* Main */
+.ad-main {
+  flex: 1;
+  padding: 32px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.ad-header {
+  margin-bottom: 32px;
+}
+
+.ad-page-title {
+  font-size: 1.75rem;
+  font-weight: 800;
+}
+
+/* Stats */
+.ad-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 24px;
+  margin-bottom: 40px;
+}
+
+.ad-stat-card {
+  background: white;
+  padding: 24px;
+  border-radius: 20px;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
+}
+
+.ad-stat-icon {
+  width: 54px;
+  height: 54px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ad-stat-blue { background: #eff6ff; color: #2563eb; }
+.ad-stat-purple { background: #faf5ff; color: #9333ea; }
+.ad-stat-orange { background: #fff7ed; color: #ea580c; }
+.ad-stat-green { background: #f0fdf4; color: #16a34a; }
+
+.ad-stat-val { font-size: 1.5rem; font-weight: 800; }
+.ad-stat-label { color: #64748b; font-size: 0.875rem; }
+
+/* Table */
+.ad-panel {
+  background: white;
+  border-radius: 20px;
+  border: 1px solid #e2e8f0;
+  overflow: hidden;
+  box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
+}
+
+.ad-panel-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ad-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ad-table th {
+  text-align: left;
+  padding: 16px 24px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ad-table td {
+  padding: 16px 24px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.ad-badge {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.badge-student { background: #eff6ff; color: #2563eb; }
+.badge-faculty { background: #fdf2f8; color: #db2777; }
+
+.ad-btn-edit { color: #2563eb; border: none; background: transparent; cursor: pointer; font-weight: 600; }
+.ad-btn-delete { color: #ef4444; border: none; background: transparent; cursor: pointer; font-weight: 600; margin-left: 12px; }
+
+/* Loader */
+.ad-loader {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
