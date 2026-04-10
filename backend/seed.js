@@ -108,7 +108,9 @@ const seed = async () => {
           { subject: "Operating Systems",    subjectCode: "CS502", faculty: "Faculty Member 2", room: "A-102", startTime: "09:00", endTime: "10:00" },
         ],
         Saturday: [
-          { subject: "Data Structures",    subjectCode: "CS501", faculty: "Faculty Member 1", room: "A-101", startTime: "09:00", endTime: "10:00" },
+          { subject: "Data Structures",      subjectCode: "CS501", faculty: "Faculty Member 1", room: "A-101", startTime: "09:00", endTime: "10:00" },
+          { subject: "Theory of Computation", subjectCode: "CS506", faculty: "Faculty Member 3", room: "A-101", startTime: "11:00", endTime: "12:00" },
+          { subject: "Computer Systems",      subjectCode: "CS507", faculty: "Faculty Member 5", room: "A-102", startTime: "13:00", endTime: "14:00" },
         ],
         Sunday: [],
       }
@@ -137,6 +139,8 @@ const seed = async () => {
     { subject: "Computer Networks",   subjectCode: "CS503", totalHeld: 26 },
     { subject: "Database Management", subjectCode: "CS504", totalHeld: 24 },
     { subject: "Software Engineering",subjectCode: "CS505", totalHeld: 22 },
+    { subject: "Theory of Computation",subjectCode: "CS506", totalHeld: 25 },
+    { subject: "Computer Systems",     subjectCode: "CS507", totalHeld: 20 },
   ];
 
   const attendanceDocs = [];
@@ -189,6 +193,8 @@ const seed = async () => {
     { subject: "Computer Networks",   subjectCode: "CS503", branch: "Computer Science", semester: 5, examDate: new Date("2026-03-24T09:00:00"), duration: "3 hours", room: "Exam Hall A", type: "Mid Semester" },
     { subject: "Database Management", subjectCode: "CS504", branch: "Computer Science", semester: 5, examDate: new Date("2026-03-26T09:00:00"), duration: "3 hours", room: "Exam Hall B", type: "Mid Semester" },
     { subject: "Software Engineering",subjectCode: "CS505", branch: "Computer Science", semester: 5, examDate: new Date("2026-03-28T09:00:00"), duration: "3 hours", room: "Exam Hall A", type: "Mid Semester" },
+    { subject: "Theory of Computation",subjectCode: "CS506", branch: "Computer Science", semester: 5, examDate: new Date("2026-03-30T09:00:00"), duration: "3 hours", room: "Exam Hall B", type: "Mid Semester" },
+    { subject: "Computer Systems",     subjectCode: "CS507", branch: "Computer Science", semester: 5, examDate: new Date("2026-04-01T09:00:00"), duration: "3 hours", room: "Exam Hall A", type: "Mid Semester" },
   ]);
 
   console.log("✅ All seed data inserted!");

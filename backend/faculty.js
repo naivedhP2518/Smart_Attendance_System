@@ -4,110 +4,571 @@ const qrcode = require("qrcode");
 const { exec } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const { connectDB } = require("./db");
 
-// In-memory store for active sessions: sessionId -> { subjectCode, attendees: Set(studentId) }
+// In-memory store for active sessions: sessionId -> { subjectCode, attendees, sessionSecret, ... }
 const activeSessions = new Map();
 
-// Helper to get today's day name
-const getDayName = () => new Date().toLocaleDateString('en-US', { weekday: 'long' });
+const QR_WINDOW_SECONDS = 30;
 
-// ── NEW: Faculty Dashboard Stats ──────────────────────────────
+const getCurrentTimeSlot = () => Math.floor(Date.now() / (QR_WINDOW_SECONDS * 1000));
+
+const generateRotatingToken = (sessionId, sessionSecret, timeSlot) =>
+  crypto
+    .createHmac("sha256", sessionSecret)
+    .update(`${sessionId}:${timeSlot}`)
+    .digest("hex")
+    .substring(0, 16);
+
+const validateRotatingToken = (sessionId, sessionSecret, receivedToken) => {
+  if (!receivedToken || !sessionSecret) return false;
+  const currentSlot = getCurrentTimeSlot();
+  
+  // Check current slot, previous slot, and next slot to allow for clock skew
+  for (let slot = currentSlot - 1; slot <= currentSlot + 1; slot++) {
+    const validToken = generateRotatingToken(sessionId, sessionSecret, slot);
+    if (validToken === receivedToken) return true;
+  }
+  return false;
+};
+
+const createSessionId = () => crypto.randomBytes(4).toString("hex").toUpperCase();
+const getDayName = () => new Date().toLocaleDateString("en-US", { weekday: "long" });
+
+const getTodayBounds = () => {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+
+  return { start, end };
+};
+
+const getTokenExpiresInSeconds = () =>
+  QR_WINDOW_SECONDS - (Math.floor(Date.now() / 1000) % QR_WINDOW_SECONDS);
+
+const normalizeStudentId = (studentId = "") => String(studentId).trim().toUpperCase();
+
+const dedupeAttendanceLog = (attendanceLog = []) => {
+  const seenStudentIds = new Set();
+
+  return attendanceLog.reduce((entries, entry) => {
+    const normalizedStudentId = normalizeStudentId(entry.studentId);
+    if (!normalizedStudentId || seenStudentIds.has(normalizedStudentId)) {
+      return entries;
+    }
+
+    seenStudentIds.add(normalizedStudentId);
+    entries.push({
+      studentId: normalizedStudentId,
+      markedAt: entry.markedAt || new Date().toISOString(),
+    });
+
+    return entries;
+  }, []);
+};
+
+const getLectureTime = ({ lectureTime, startTime, endTime }) =>
+  lectureTime || [startTime, endTime].filter(Boolean).join(" - ");
+
+const getLectureKey = (data = {}) =>
+  [
+    data.subjectCode || "",
+    data.className || "",
+    getLectureTime(data),
+    data.room || "",
+  ]
+    .map((value) => String(value).trim().toUpperCase())
+    .join("::");
+
+const serializeSession = (sessionId, sessionData) => ({
+  sessionId,
+  subjectCode: sessionData.subjectCode,
+  lectureTime: sessionData.lectureTime,
+  room: sessionData.room,
+  className: sessionData.className,
+  lectureKey: sessionData.lectureKey || getLectureKey(sessionData),
+  createdAt: sessionData.createdAt,
+  updatedAt: sessionData.updatedAt || sessionData.createdAt,
+  attendeeIds: Array.from(sessionData.attendees || []),
+  attendanceLog: sessionData.attendanceLog || [],
+  presentCount: sessionData.attendees?.size || 0,
+  status: "active",
+  sourceSessionId: sessionData.sourceSessionId || null,
+  resumedFromPrevious: Boolean(sessionData.resumedFromPrevious),
+  restartMode: sessionData.restartMode || "new",
+  restartReason: sessionData.restartReason || "",
+});
+
+const mapStoredSession = (sessionData = {}) => ({
+  sessionId: sessionData.sessionId,
+  subjectCode: sessionData.subjectCode,
+  lectureTime: sessionData.lectureTime,
+  room: sessionData.room,
+  className: sessionData.className,
+  lectureKey: sessionData.lectureKey || getLectureKey(sessionData),
+  createdAt: sessionData.createdAt,
+  updatedAt: sessionData.updatedAt || sessionData.createdAt,
+  attendeeIds: sessionData.attendeeIds || [],
+  attendanceLog: sessionData.attendanceLog || [],
+  presentCount: (sessionData.attendeeIds || []).length,
+  status: sessionData.status || "ended",
+  sourceSessionId: sessionData.sourceSessionId || null,
+  resumedFromPrevious: Boolean(sessionData.resumedFromPrevious),
+  restartMode: sessionData.restartMode || "new",
+  restartReason: sessionData.restartReason || "",
+});
+
+const resolveSessionSource = async (sessionId, db) => {
+  if (!sessionId) return null;
+
+  const activeSession = activeSessions.get(sessionId);
+  if (activeSession) {
+    return serializeSession(sessionId, activeSession);
+  }
+
+  const storedSession = await db.collection("qr_attendance_sessions").findOne({ sessionId });
+  return storedSession ? mapStoredSession(storedSession) : null;
+};
+
+const pickLatestSession = (currentSession, nextSession) => {
+  if (!currentSession) return nextSession;
+
+  const currentTime = new Date(
+    currentSession.updatedAt || currentSession.endedAt || currentSession.createdAt || 0
+  ).getTime();
+  const nextTime = new Date(
+    nextSession.updatedAt || nextSession.endedAt || nextSession.createdAt || 0
+  ).getTime();
+
+  return nextTime >= currentTime ? nextSession : currentSession;
+};
+
+const buildScanUrl = (sessionId, sessionSecret) => {
+  const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+  const token = generateRotatingToken(sessionId, sessionSecret, getCurrentTimeSlot());
+  return `${clientUrl}/scan?sessionId=${sessionId}&token=${token}`;
+};
+
+const syncSessionToDb = async (db, sessionId, sessionData, extraFields = {}) => {
+  await db.collection("qr_attendance_sessions").updateOne(
+    { sessionId },
+    {
+      $set: {
+        sessionId,
+        subjectCode: sessionData.subjectCode,
+        lectureTime: sessionData.lectureTime,
+        room: sessionData.room,
+        className: sessionData.className,
+        lectureKey: sessionData.lectureKey || getLectureKey(sessionData),
+        createdAt: sessionData.createdAt || new Date(),
+        attendeeIds: Array.from(sessionData.attendees || []),
+        attendanceLog: sessionData.attendanceLog || [],
+        sourceSessionId: sessionData.sourceSessionId || null,
+        resumedFromPrevious: Boolean(sessionData.resumedFromPrevious),
+        restartMode: sessionData.restartMode || "new",
+        restartReason: sessionData.restartReason || "",
+        updatedAt: new Date(),
+        ...extraFields,
+      },
+    },
+    { upsert: true }
+  );
+};
+
 router.get("/dashboard", async (req, res) => {
   try {
     const db = await connectDB();
     const studentsCount = await db.collection("students").countDocuments();
     const examsCount = await db.collection("exams").countDocuments();
-    
-    // Mocking some stats for the premium look
+    const day = getDayName();
+    const timetables = await db.collection("timetable").find({}).toArray();
+    const todayLecturesCount = timetables.reduce(
+      (count, timetable) => count + ((timetable.schedule?.[day] || []).length),
+      0
+    );
+
     res.json({
       success: true,
       data: {
-        todayLecturesCount: 4,
+        todayLecturesCount,
         totalStudents: studentsCount,
         averageAttendance: 84,
-        upcomingExamsCount: examsCount
-      }
+        upcomingExamsCount: examsCount,
+      },
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Error fetching dashboard" });
+    console.error("Faculty dashboard error:", error);
+    res.status(500).json({ success: false, message: "Error fetching dashboard." });
   }
 });
 
-// ── NEW: Today's Lectures for Faculty ─────────────────────────
 router.get("/today-lectures", async (req, res) => {
   try {
     const db = await connectDB();
     const day = getDayName();
-    
-    // Find all timetable entries that have a schedule for today
+    const { start, end } = getTodayBounds();
+
     const timetables = await db.collection("timetable").find({}).toArray();
-    
-    let todayLecs = [];
-    timetables.forEach(tt => {
-      const daySchedule = tt.schedule[day] || [];
-      daySchedule.forEach(lec => {
-        todayLecs.push({
-          ...lec,
-          semester: tt.semester,
-          className: tt.className
+    const storedSessions = await db.collection("qr_attendance_sessions")
+      .find({ createdAt: { $gte: start, $lt: end } })
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .toArray();
+
+    const latestSessionsByLecture = new Map();
+
+    storedSessions.forEach((sessionDoc) => {
+      const mappedSession = mapStoredSession(sessionDoc);
+      const lectureKey = mappedSession.lectureKey;
+      latestSessionsByLecture.set(
+        lectureKey,
+        pickLatestSession(latestSessionsByLecture.get(lectureKey), mappedSession)
+      );
+    });
+
+    Array.from(activeSessions.entries()).forEach(([sessionId, sessionData]) => {
+      const mappedSession = serializeSession(sessionId, sessionData);
+      const lectureKey = mappedSession.lectureKey;
+      latestSessionsByLecture.set(
+        lectureKey,
+        pickLatestSession(latestSessionsByLecture.get(lectureKey), mappedSession)
+      );
+    });
+
+    const todayLectures = [];
+    timetables.forEach((timetable) => {
+      const daySchedule = timetable.schedule?.[day] || [];
+      daySchedule.forEach((lecture) => {
+        const className = timetable.className;
+        const lectureTime = `${lecture.startTime} - ${lecture.endTime}`;
+        const lectureKey = getLectureKey({
+          subjectCode: lecture.subjectCode,
+          className,
+          lectureTime,
+          room: lecture.room,
+        });
+        const latestSession = latestSessionsByLecture.get(lectureKey);
+
+        todayLectures.push({
+          ...lecture,
+          semester: timetable.semester,
+          className,
+          lectureKey,
+          sessionStatus: latestSession?.status || "idle",
+          latestSessionId: latestSession?.sessionId || null,
+          latestPresentCount: latestSession?.presentCount || 0,
+          latestRestartReason: latestSession?.restartReason || "",
+          latestRestartMode: latestSession?.restartMode || "",
+          attendanceTaken: Boolean(latestSession),
         });
       });
     });
 
-    res.json({ success: true, data: todayLecs });
+    res.json({ success: true, data: todayLectures });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Error fetching lectures" });
+    console.error("Today lectures error:", error);
+    res.status(500).json({ success: false, message: "Error fetching lectures." });
   }
 });
 
-// Generate QR Code session
+router.get("/students", async (req, res) => {
+  try {
+    const db = await connectDB();
+    const students = await db.collection("students")
+      .find({}, { projection: { password: 0 } })
+      .sort({ uniqueId: 1 })
+      .toArray();
+
+    const attendanceRecords = await db.collection("attendance").find({}).toArray();
+    const { start, end } = getTodayBounds();
+
+    const todaySessions = await db.collection("qr_attendance_sessions")
+      .find({ createdAt: { $gte: start, $lt: end } })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const todayPresentIds = new Set(
+      todaySessions
+        .flatMap((session) => session.attendeeIds || [])
+        .map((studentId) => normalizeStudentId(studentId))
+    );
+
+    const activeSessionEntries = Array.from(activeSessions.entries());
+    const activeSession = activeSessionEntries.length > 0
+      ? serializeSession(...activeSessionEntries[activeSessionEntries.length - 1])
+      : null;
+
+    activeSessionEntries.forEach(([, sessionData]) => {
+      Array.from(sessionData.attendees || []).forEach((studentId) => {
+        todayPresentIds.add(normalizeStudentId(studentId));
+      });
+    });
+
+    const studentsWithStats = students.map((student) => {
+      const records = attendanceRecords.filter((record) => record.studentId === student.uniqueId);
+      const totalHeld = records.reduce((sum, record) => sum + (record.totalHeld || 0), 0);
+      const totalAttended = records.reduce((sum, record) => sum + (record.totalAttended || 0), 0);
+      const attendance = totalHeld > 0 ? Math.round((totalAttended / totalHeld) * 100) : 0;
+
+      return {
+        id: student.uniqueId,
+        name: student.name,
+        branch: student.branch,
+        semester: student.semester,
+        attendance,
+        isPresentToday: todayPresentIds.has(normalizeStudentId(student.uniqueId)),
+      };
+    });
+
+    const latestStoredSession = todaySessions[0] ? mapStoredSession(todaySessions[0]) : null;
+    const latestSession = activeSession || latestStoredSession;
+
+    res.json({
+      success: true,
+      data: {
+        students: studentsWithStats,
+        summary: {
+          totalStudents: students.length,
+          todayPresentCount: todayPresentIds.size,
+          latestSessionCount: latestSession?.presentCount || 0,
+          latestSessionLabel: latestSession
+            ? `${latestSession.subjectCode} - ${latestSession.className}`
+            : "No QR session today",
+          latestSessionStatus: latestSession?.status || "idle",
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Faculty students error:", error);
+    res.status(500).json({ success: false, message: "Error fetching students." });
+  }
+});
+
+router.get("/live-session/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const db = await connectDB();
+
+    const activeSession = activeSessions.get(sessionId);
+    const storedSession = !activeSession
+      ? await db.collection("qr_attendance_sessions").findOne({ sessionId })
+      : null;
+
+    const sessionData = activeSession
+      ? serializeSession(sessionId, activeSession)
+      : storedSession
+        ? mapStoredSession(storedSession)
+        : null;
+
+    if (!sessionData) {
+      return res.status(404).json({ success: false, message: "Session not found." });
+    }
+
+    const rawAttendanceLog = (sessionData.attendanceLog || []).length > 0
+      ? sessionData.attendanceLog
+      : (sessionData.attendeeIds || []).map((studentId) => ({
+          studentId: normalizeStudentId(studentId),
+          markedAt: sessionData.updatedAt || sessionData.createdAt || new Date().toISOString(),
+        }));
+
+    const attendanceLog = dedupeAttendanceLog(rawAttendanceLog);
+    const studentIds = attendanceLog.map((entry) => entry.studentId);
+    const students = studentIds.length > 0
+      ? await db.collection("students")
+          .find(
+            { uniqueId: { $in: studentIds } },
+            { projection: { password: 0 } }
+          )
+          .toArray()
+      : [];
+
+    const studentMap = new Map(students.map((student) => [normalizeStudentId(student.uniqueId), student]));
+
+    const attendees = attendanceLog.map((entry) => {
+      const student = studentMap.get(entry.studentId);
+      return {
+        id: entry.studentId,
+        name: student?.name || entry.studentId,
+        branch: student?.branch || "Unknown",
+        semester: student?.semester || "-",
+        markedAt: entry.markedAt,
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        session: {
+          sessionId,
+          subjectCode: sessionData.subjectCode,
+          lectureTime: sessionData.lectureTime,
+          room: sessionData.room,
+          className: sessionData.className,
+          createdAt: sessionData.createdAt,
+          status: activeSession ? "active" : sessionData.status || "ended",
+          presentCount: attendees.length,
+          restartMode: sessionData.restartMode || "new",
+          restartReason: sessionData.restartReason || "",
+        },
+        attendees,
+      },
+    });
+  } catch (error) {
+    console.error("Live session fetch error:", error);
+    res.status(500).json({ success: false, message: "Error fetching live session." });
+  }
+});
+
 router.post("/generate-qr", async (req, res) => {
   try {
-    const { subjectCode, lectureTime, room } = req.body;
-    
-    // Generate simple random sessionId
-    const sessionId = Math.random().toString(36).substring(2, 10).toUpperCase();
+    const {
+      subjectCode,
+      lectureTime,
+      room,
+      className,
+      semester,
+      carryForwardSessionId,
+      restartFromSessionId,
+      restartReason = "",
+      restartMode = "new",
+    } = req.body;
 
-    // Store new active session
-    activeSessions.set(sessionId, {
+    const normalizedRestartReason = String(restartReason).trim();
+    if (restartFromSessionId && !normalizedRestartReason) {
+      return res.status(400).json({
+        success: false,
+        message: "Generate again karne ke liye Issue / Reason likhna zaroori hai.",
+      });
+    }
+
+    const createdAt = new Date();
+    const db = await connectDB();
+
+    let attendeeIds = [];
+    let attendanceLog = [];
+
+    if (carryForwardSessionId) {
+      const sourceSession = await resolveSessionSource(carryForwardSessionId, db);
+      if (!sourceSession) {
+        return res.status(404).json({
+          success: false,
+          message: "Previous attendance session not found. Fresh attendance start karo.",
+        });
+      }
+
+      attendeeIds = Array.from(
+        new Set((sourceSession.attendeeIds || []).map(normalizeStudentId).filter(Boolean))
+      );
+      attendanceLog = dedupeAttendanceLog(
+        sourceSession.attendanceLog?.length > 0
+          ? sourceSession.attendanceLog
+          : attendeeIds.map((studentId) => ({
+              studentId,
+              markedAt: sourceSession.updatedAt || sourceSession.createdAt || createdAt.toISOString(),
+            }))
+      );
+    }
+
+    const sessionId = createSessionId();
+    const sessionSecret = crypto.randomBytes(32).toString("hex");
+    const lectureKey = getLectureKey({ subjectCode, className, lectureTime, room });
+    const activeSessionData = {
       subjectCode: subjectCode || "Unknown",
       lectureTime: lectureTime || "Unknown",
       room: room || "Unknown",
-      className: req.body.className || "General",
-      attendees: new Set()
-    });
+      className: className || "General",
+      lectureKey,
+      createdAt,
+      updatedAt: createdAt,
+      attendees: new Set(attendeeIds),
+      attendanceLog,
+      sessionSecret,
+      sourceSessionId: restartFromSessionId || carryForwardSessionId || null,
+      resumedFromPrevious: Boolean(carryForwardSessionId),
+      restartMode,
+      restartReason: normalizedRestartReason,
+    };
 
-    // Create the tracking URL for students
-    const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
-    const scanUrl = `${clientUrl}/scan?sessionId=${sessionId}`;
+    activeSessions.set(sessionId, activeSessionData);
+    await syncSessionToDb(db, sessionId, activeSessionData, { status: "active" });
 
-    // Generate base64 QR Code image
-    const qrCodeImage = await qrcode.toDataURL(scanUrl);
+    // ── PERMANENT FIX: Increment totalHeld for all students in this class ──
+    try {
+      if (className && semester) {
+        await db.collection("attendance").updateMany(
+          { semester: parseInt(semester) },
+          { $inc: { totalHeld: 1 } }
+        );
+      }
+    } catch (dbErr) {
+      console.error("Error updating totalHeld for class:", dbErr);
+    }
+
+    const qrCode = await qrcode.toDataURL(buildScanUrl(sessionId, sessionSecret));
 
     res.json({
       success: true,
       sessionId,
-      qrCode: qrCodeImage
+      qrCode,
+      tokenExpiresInSeconds: getTokenExpiresInSeconds(),
+      carryForwarded: Boolean(carryForwardSessionId),
+      presentCount: attendeeIds.length,
     });
-
   } catch (error) {
-    console.error("QR Generation Info:", error);
-    res.status(500).json({ success: false, message: "Server Error generating QR" });
+    console.error("QR generation error:", error);
+    res.status(500).json({ success: false, message: "Server Error generating QR." });
   }
 });
 
-// End session and trigger python script
-router.post("/end-qr-session", (req, res) => {
-  const { subjectCode } = req.body;
-  
-  // Find the exact session or randomly pick last if missing
-  let targetSessionId = null;
-  for (const [sId, sData] of activeSessions.entries()) {
-    if (!subjectCode || sData.subjectCode === subjectCode) {
-      targetSessionId = sId;
-      break;
+router.get("/refresh-qr/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const db = await connectDB();
+    
+    let session = activeSessions.get(sessionId);
+    if (!session) {
+      const stored = await db.collection("qr_attendance_sessions").findOne({ sessionId });
+      if (stored && stored.status === "active") {
+        session = {
+          ...stored,
+          attendees: new Set(stored.attendeeIds || []),
+          attendanceLog: stored.attendanceLog || []
+        };
+        activeSessions.set(sessionId, session);
+      }
+    }
+
+    if (!session) {
+      return res.status(404).json({ success: false, message: "Session not found or already ended." });
+    }
+
+    const qrCode = await qrcode.toDataURL(buildScanUrl(sessionId, session.sessionSecret));
+
+    res.json({
+      success: true,
+      qrCode,
+      tokenExpiresInSeconds: getTokenExpiresInSeconds(),
+    });
+  } catch (error) {
+    console.error("Refresh QR error:", error);
+    res.status(500).json({ success: false, message: "Error refreshing QR." });
+  }
+});
+
+router.post("/end-qr-session", async (req, res) => {
+  const { sessionId, subjectCode } = req.body;
+
+  let targetSessionId = sessionId && activeSessions.has(sessionId) ? sessionId : null;
+
+  if (!targetSessionId) {
+    for (const [activeId, sessionData] of activeSessions.entries()) {
+      if (!subjectCode || sessionData.subjectCode === subjectCode) {
+        targetSessionId = activeId;
+        break;
+      }
     }
   }
 
@@ -116,41 +577,70 @@ router.post("/end-qr-session", (req, res) => {
   }
 
   const sessionData = activeSessions.get(targetSessionId);
-  const presentStudents = Array.from(sessionData.attendees);
-
-  // Clear session
+  const presentStudents = Array.from(sessionData.attendees || []);
+  const endedAt = new Date();
   activeSessions.delete(targetSessionId);
 
-  // Write temporary present list to a file for Python script to read
+  try {
+    const db = await connectDB();
+    await syncSessionToDb(
+      db,
+      targetSessionId,
+      {
+        ...sessionData,
+        attendees: new Set(presentStudents),
+        updatedAt: endedAt,
+      },
+      {
+        status: "ended",
+        endedAt,
+      }
+    );
+  } catch (error) {
+    console.error("Error syncing ended session:", error);
+  }
+
   const payloadPath = path.join(__dirname, "temp_attendance.json");
-  fs.writeFileSync(payloadPath, JSON.stringify({
-    subjectCode: sessionData.subjectCode,
-    className: sessionData.className,
-    present: presentStudents,
-    date: new Date().toISOString()
-  }));
+  try {
+    fs.writeFileSync(
+      payloadPath,
+      JSON.stringify({
+        subjectCode: sessionData.subjectCode,
+        className: sessionData.className,
+        present: presentStudents,
+        date: endedAt.toISOString(),
+      })
+    );
+  } catch (error) {
+    console.error("Attendance payload write error:", error);
+  }
 
-  // Trigger python agent to create excel sheet
   const scriptPath = path.join(__dirname, "attendance_agent.py");
-  exec(`python "${scriptPath}"`, (error, stdout, stderr) => {
-      if (error) {
-        console.error(`Python script error: ${error.message}`);
-        // Optionally clean up tmp file on error or just let it overwrite next time
-        return res.status(500).json({ success: false, message: "Error running attendance generation." });
+  exec(`python "${scriptPath}"`, (error, stdout) => {
+    if (fs.existsSync(payloadPath)) {
+      try {
+        fs.unlinkSync(payloadPath);
+      } catch (cleanupError) {
+        console.error("Attendance payload cleanup error:", cleanupError);
       }
-      
-      console.log(`Python Script output: ${stdout}`);
-      
-      // Check if temporary file generated exists
-      if(fs.existsSync(payloadPath)){
-         try { fs.unlinkSync(payloadPath); }catch(e){} // Cleanup
-      }
+    }
 
-      res.json({ success: true, message: "Attendance session ended. Excel file generated." });
+    if (error) {
+      console.error(`Python script error: ${error.message}`);
+      return res.json({
+        success: true,
+        sessionId: targetSessionId,
+        message: "Attendance saved. Report generation skipped.",
+      });
+    }
+
+    console.log(`Python Script output: ${stdout}`);
+    return res.json({
+      success: true,
+      sessionId: targetSessionId,
+      message: "Attendance session ended. Excel file generated.",
+    });
   });
-
 });
 
-// We need a way for the student router to add attendance to the `activeSessions` map.
-// Exporting map allowing other routes to interact with it
-module.exports = { router, activeSessions };
+module.exports = { router, activeSessions, validateRotatingToken };

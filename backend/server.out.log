@@ -1,0 +1,11 @@
+[dotenv@17.3.1] injecting env (5) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+✅ MongoDB connected → campus_connect
+
+==================================================
+🚀 API BACKEND (HTTPS): https://192.168.1.9:5000
+📱 MOBILE ACCESS: Open https://192.168.1.9:3000 on your phone
+==================================================
+⚠️  SECURITY NOTE: On mobile, click 'Advanced' -> 'Proceed' for BOTH 3000 and 5000 links.
+==================================================
+
+✅ MongoDB connected → campus_connect
