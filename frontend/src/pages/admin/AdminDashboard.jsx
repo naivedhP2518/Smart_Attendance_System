@@ -1,18 +1,11 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import axios from "axios";
 import "./AdminDashboard.css";
 import AdminOverviewTab from "./components/AdminOverviewTab";
 import AdminUsersTab from "./components/AdminUsersTab";
 import AdminTimetableTab from "./components/AdminTimetableTab";
 import AdminEventsTab from "./components/AdminEventsTab";
-
-const api = axios.create({ baseURL: "http://localhost:5000/api/admin" });
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("token");
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
+import api from "../../utils/api";
 
 const Icons = {
   Logo: () => (
@@ -85,7 +78,7 @@ export default function AdminDashboard() {
 
   const fetchStats = async () => {
     try {
-      const res = await api.get("/stats");
+      const res = await api.get("/admin/stats");
       setStats(res.data.stats);
       setLoading(false);
     } catch (err) {
@@ -96,7 +89,7 @@ export default function AdminDashboard() {
 
   const fetchUsers = async () => {
     try {
-      const res = await api.get("/users");
+      const res = await api.get("/admin/users");
       setUsers({ students: res.data.students, faculty: res.data.faculty });
     } catch (err) {
       console.error(err);
@@ -109,7 +102,7 @@ export default function AdminDashboard() {
     }
 
     try {
-      await api.delete(`/users/${role}/${id}`);
+      await api.delete(`/admin/users/${role}/${id}`);
       fetchUsers();
       fetchStats();
     } catch (err) {

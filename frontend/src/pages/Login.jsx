@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import axios from "axios";
 import "./Login.css";
+import api from "../utils/api";
 
 // ── SVG Icons ────────────────────────────────────────────────────────────────
 const LogoMark = () => (
@@ -105,6 +105,8 @@ const ShieldSVG = () => (
   </svg>
 );
 
+const PENDING_SCAN_PATH_KEY = "pendingScanPath";
+
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function Login() {
   const navigate = useNavigate();
@@ -124,7 +126,7 @@ export default function Login() {
     }
     setLoading(true);
     try {
-      const res = await axios.post("http://localhost:5000/api/auth/login", {
+      const res = await api.post("/auth/login", {
         uniqueId: uniqueId.trim(),
         password,
         role,
@@ -132,10 +134,20 @@ export default function Login() {
       if (res.data.success) {
         localStorage.setItem("token", res.data.token);
         localStorage.setItem("user", JSON.stringify(res.data.user));
-        // Navigate based on role
-        if (res.data.user.role === "student") navigate("/student/dashboard");
-        else if (res.data.user.role === "admin") navigate("/admin/dashboard");
-        else navigate("/faculty/dashboard");
+        const pendingScanPath = localStorage.getItem(PENDING_SCAN_PATH_KEY);
+
+        if (res.data.user.role === "student" && pendingScanPath) {
+          localStorage.removeItem(PENDING_SCAN_PATH_KEY);
+          navigate(pendingScanPath);
+        } else if (res.data.user.role === "student") {
+          navigate("/student/dashboard");
+        } else if (res.data.user.role === "admin") {
+          localStorage.removeItem(PENDING_SCAN_PATH_KEY);
+          navigate("/admin/dashboard");
+        } else {
+          localStorage.removeItem(PENDING_SCAN_PATH_KEY);
+          navigate("/faculty/dashboard");
+        }
       }
     } catch (err) {
       setError(err.response?.data?.message || "Something went wrong. Please try again.");

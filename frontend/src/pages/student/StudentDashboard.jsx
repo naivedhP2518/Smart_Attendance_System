@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import axios from "axios";
 import { Html5QrcodeScanner } from "html5-qrcode";
+import api from "../../utils/api";
 import "./StudentDashboard.css";
 import StudentOverviewTab from "./components/StudentOverviewTab";
 import StudentScanQrTab from "./components/StudentScanQrTab";
@@ -10,13 +10,6 @@ import StudentAttendanceTab from "./components/StudentAttendanceTab";
 import StudentResultsTab from "./components/StudentResultsTab";
 import StudentNoticesTab from "./components/StudentNoticesTab";
 import StudentExamsTab from "./components/StudentExamsTab";
-
-const api = axios.create({ baseURL: "http://localhost:5000/api" });
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("token");
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
 
 const Icons = {
   Logo: () => (
@@ -236,22 +229,24 @@ export default function StudentDashboard() {
         scanner.render(
           (decodedText) => {
             try {
-              let extractedSessionId = null;
+                let extractedSessionId = null;
+                let extractedToken = null;
 
-              if (decodedText.startsWith("http")) {
-                const parsedUrl = new URL(decodedText);
-                extractedSessionId = parsedUrl.searchParams.get("sessionId");
-              } else {
-                extractedSessionId = decodedText.trim();
-              }
+                if (decodedText.startsWith("http")) {
+                  const urlObj = new URL(decodedText);
+                  extractedSessionId = urlObj.searchParams.get("sessionId");
+                  extractedToken = urlObj.searchParams.get("token");
+                } else {
+                  extractedSessionId = decodedText.trim();
+                }
 
-              if (extractedSessionId) {
-                scanner.clear();
-                scannerRef.current = null;
-                setScanResult({ sessionId: extractedSessionId });
-              } else {
-                setScanMsg("Invalid QR Format. No sessionId found in URL.");
-              }
+                if (extractedSessionId) {
+                  scanner.clear();
+                  scannerRef.current = null;
+                  setScanResult({ sessionId: extractedSessionId, token: extractedToken });
+                } else {
+                  setScanMsg("Invalid QR code. Scan directly from faculty screen.");
+                }
             } catch (err) {
               console.error("QR Parse Error:", err);
               setScanMsg("Invalid QR code scanned.");
@@ -281,8 +276,8 @@ export default function StudentDashboard() {
     setScanMsg("");
     api
       .post("/student/mark-attendance", {
-        studentId: student?.uniqueId,
         sessionId: scanResult?.sessionId,
+        token: scanResult?.token,
       })
       .then((res) => {
         setScanMsg(res.data.message || "Attendance marked successfully!");

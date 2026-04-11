@@ -12,6 +12,7 @@ const { connectDB } = require("./db");
 const activeSessions = new Map();
 
 const QR_WINDOW_SECONDS = 30;
+const SESSION_DURATION_SECONDS = 5 * 60;
 
 const getCurrentTimeSlot = () => Math.floor(Date.now() / (QR_WINDOW_SECONDS * 1000));
 
@@ -49,6 +50,18 @@ const getTodayBounds = () => {
 
 const getTokenExpiresInSeconds = () =>
   QR_WINDOW_SECONDS - (Math.floor(Date.now() / 1000) % QR_WINDOW_SECONDS);
+
+const getSessionExpiresAt = (createdAt) =>
+  new Date(new Date(createdAt).getTime() + SESSION_DURATION_SECONDS * 1000);
+
+const getSessionExpiresInSeconds = (sessionData = {}) => {
+  const expiresAt = new Date(sessionData.expiresAt || getSessionExpiresAt(sessionData.createdAt || new Date()));
+  return Math.max(Math.ceil((expiresAt.getTime() - Date.now()) / 1000), 0);
+};
+
+const isSessionExpired = (sessionData = {}) => getSessionExpiresInSeconds(sessionData) === 0;
+
+const normalizeBaseUrl = (value = "") => String(value).trim().replace(/\/+$/, "");
 
 const normalizeStudentId = (studentId = "") => String(studentId).trim().toUpperCase();
 
@@ -92,11 +105,13 @@ const serializeSession = (sessionId, sessionData) => ({
   className: sessionData.className,
   lectureKey: sessionData.lectureKey || getLectureKey(sessionData),
   createdAt: sessionData.createdAt,
+  expiresAt: sessionData.expiresAt || getSessionExpiresAt(sessionData.createdAt),
   updatedAt: sessionData.updatedAt || sessionData.createdAt,
   attendeeIds: Array.from(sessionData.attendees || []),
   attendanceLog: sessionData.attendanceLog || [],
   presentCount: sessionData.attendees?.size || 0,
   status: "active",
+  clientUrl: sessionData.clientUrl || null,
   sourceSessionId: sessionData.sourceSessionId || null,
   resumedFromPrevious: Boolean(sessionData.resumedFromPrevious),
   restartMode: sessionData.restartMode || "new",
@@ -111,11 +126,13 @@ const mapStoredSession = (sessionData = {}) => ({
   className: sessionData.className,
   lectureKey: sessionData.lectureKey || getLectureKey(sessionData),
   createdAt: sessionData.createdAt,
+  expiresAt: sessionData.expiresAt || getSessionExpiresAt(sessionData.createdAt),
   updatedAt: sessionData.updatedAt || sessionData.createdAt,
   attendeeIds: sessionData.attendeeIds || [],
   attendanceLog: sessionData.attendanceLog || [],
   presentCount: (sessionData.attendeeIds || []).length,
   status: sessionData.status || "ended",
+  clientUrl: sessionData.clientUrl || null,
   sourceSessionId: sessionData.sourceSessionId || null,
   resumedFromPrevious: Boolean(sessionData.resumedFromPrevious),
   restartMode: sessionData.restartMode || "new",
@@ -147,8 +164,8 @@ const pickLatestSession = (currentSession, nextSession) => {
   return nextTime >= currentTime ? nextSession : currentSession;
 };
 
-const buildScanUrl = (sessionId, sessionSecret) => {
-  const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+const buildScanUrl = (sessionId, sessionSecret, host = null) => {
+  const clientUrl = normalizeBaseUrl(host || process.env.CLIENT_URL || "http://localhost:3000");
   const token = generateRotatingToken(sessionId, sessionSecret, getCurrentTimeSlot());
   return `${clientUrl}/scan?sessionId=${sessionId}&token=${token}`;
 };
@@ -165,8 +182,10 @@ const syncSessionToDb = async (db, sessionId, sessionData, extraFields = {}) => 
         className: sessionData.className,
         lectureKey: sessionData.lectureKey || getLectureKey(sessionData),
         createdAt: sessionData.createdAt || new Date(),
+        expiresAt: sessionData.expiresAt || getSessionExpiresAt(sessionData.createdAt || new Date()),
         attendeeIds: Array.from(sessionData.attendees || []),
         attendanceLog: sessionData.attendanceLog || [],
+        clientUrl: sessionData.clientUrl || null,
         sourceSessionId: sessionData.sourceSessionId || null,
         resumedFromPrevious: Boolean(sessionData.resumedFromPrevious),
         restartMode: sessionData.restartMode || "new",
@@ -367,6 +386,26 @@ router.get("/live-session/:sessionId", async (req, res) => {
       return res.status(404).json({ success: false, message: "Session not found." });
     }
 
+    if (isSessionExpired(sessionData)) {
+      if (activeSession) {
+        activeSessions.delete(sessionId);
+        await syncSessionToDb(
+          db,
+          sessionId,
+          {
+            ...activeSession,
+            attendees: new Set(activeSession.attendees || []),
+          },
+          {
+            status: "expired",
+            endedAt: new Date(sessionData.expiresAt || new Date()),
+          }
+        );
+      }
+
+      return res.status(410).json({ success: false, message: "Session expired." });
+    }
+
     const rawAttendanceLog = (sessionData.attendanceLog || []).length > 0
       ? sessionData.attendanceLog
       : (sessionData.attendeeIds || []).map((studentId) => ({
@@ -408,8 +447,11 @@ router.get("/live-session/:sessionId", async (req, res) => {
           room: sessionData.room,
           className: sessionData.className,
           createdAt: sessionData.createdAt,
+          expiresAt: sessionData.expiresAt,
           status: activeSession ? "active" : sessionData.status || "ended",
           presentCount: attendees.length,
+          tokenExpiresInSeconds: getTokenExpiresInSeconds(),
+          sessionExpiresInSeconds: getSessionExpiresInSeconds(sessionData),
           restartMode: sessionData.restartMode || "new",
           restartReason: sessionData.restartReason || "",
         },
@@ -430,6 +472,7 @@ router.post("/generate-qr", async (req, res) => {
       room,
       className,
       semester,
+      clientUrl,
       carryForwardSessionId,
       restartFromSessionId,
       restartReason = "",
@@ -445,6 +488,9 @@ router.post("/generate-qr", async (req, res) => {
     }
 
     const createdAt = new Date();
+    const resolvedClientUrl = normalizeBaseUrl(
+      clientUrl || req.get("origin") || process.env.CLIENT_URL || "http://localhost:3000"
+    );
     const db = await connectDB();
 
     let attendeeIds = [];
@@ -482,10 +528,12 @@ router.post("/generate-qr", async (req, res) => {
       className: className || "General",
       lectureKey,
       createdAt,
+      expiresAt: getSessionExpiresAt(createdAt),
       updatedAt: createdAt,
       attendees: new Set(attendeeIds),
       attendanceLog,
       sessionSecret,
+      clientUrl: resolvedClientUrl,
       sourceSessionId: restartFromSessionId || carryForwardSessionId || null,
       resumedFromPrevious: Boolean(carryForwardSessionId),
       restartMode,
@@ -506,14 +554,15 @@ router.post("/generate-qr", async (req, res) => {
     } catch (dbErr) {
       console.error("Error updating totalHeld for class:", dbErr);
     }
-
-    const qrCode = await qrcode.toDataURL(buildScanUrl(sessionId, sessionSecret));
+    
+    const qrCode = await qrcode.toDataURL(buildScanUrl(sessionId, sessionSecret, resolvedClientUrl));
 
     res.json({
       success: true,
       sessionId,
       qrCode,
       tokenExpiresInSeconds: getTokenExpiresInSeconds(),
+      sessionExpiresInSeconds: getSessionExpiresInSeconds(activeSessionData),
       carryForwarded: Boolean(carryForwardSessionId),
       presentCount: attendeeIds.length,
     });
@@ -545,16 +594,84 @@ router.get("/refresh-qr/:sessionId", async (req, res) => {
       return res.status(404).json({ success: false, message: "Session not found or already ended." });
     }
 
-    const qrCode = await qrcode.toDataURL(buildScanUrl(sessionId, session.sessionSecret));
+    if (isSessionExpired(session)) {
+      activeSessions.delete(sessionId);
+      await syncSessionToDb(
+        db,
+        sessionId,
+        {
+          ...session,
+          attendees: new Set(session.attendees || []),
+        },
+        {
+          status: "expired",
+          endedAt: new Date(session.expiresAt || new Date()),
+        }
+      );
+      return res.status(410).json({ success: false, message: "Session expired. Start a new QR session." });
+    }
+
+    const qrCode = await qrcode.toDataURL(buildScanUrl(sessionId, session.sessionSecret, session.clientUrl));
 
     res.json({
       success: true,
       qrCode,
       tokenExpiresInSeconds: getTokenExpiresInSeconds(),
+      sessionExpiresInSeconds: getSessionExpiresInSeconds(session),
     });
   } catch (error) {
     console.error("Refresh QR error:", error);
     res.status(500).json({ success: false, message: "Error refreshing QR." });
+  }
+});
+
+router.get("/live-session/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const db = await connectDB();
+    
+    let session = activeSessions.get(sessionId);
+    if (!session) {
+      const stored = await db.collection("qr_attendance_sessions").findOne({ sessionId });
+      if (stored) {
+        session = {
+          ...stored,
+          attendees: new Set(stored.attendeeIds || [])
+        };
+      }
+    }
+
+    if (!session) {
+      return res.status(404).json({ success: false, message: "Session not found." });
+    }
+
+    const attendeeIds = Array.from(session.attendees || []);
+    
+    // Resolve names for the UI list
+    const students = await db.collection("students")
+      .find({ uniqueId: { $in: attendeeIds } })
+      .project({ name: 1, uniqueId: 1 })
+      .toArray();
+
+    const formattedAttendees = students.map(s => ({
+      id: s.uniqueId,
+      name: s.name
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        session: {
+          subjectCode: session.subjectCode,
+          className: session.className,
+          status: session.status || "active"
+        },
+        attendees: formattedAttendees
+      }
+    });
+  } catch (error) {
+    console.error("Live session fetch error:", error);
+    res.status(500).json({ success: false, message: "Error fetching live attendees." });
   }
 });
 

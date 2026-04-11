@@ -1,6 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import axios from "axios";
 import "./FacultyDashboard.css";
 import FacultyDashboardTab from "./components/FacultyDashboardTab";
 import FacultyGenerateQrTab from "./components/FacultyGenerateQrTab";
@@ -10,12 +9,7 @@ import FacultyNoticesTab from "./components/FacultyNoticesTab";
 import FacultyExamsTab from "./components/FacultyExamsTab";
 import FacultySettingsTab from "./components/FacultySettingsTab";
 
-const api = axios.create({ baseURL: "http://localhost:5000/api" });
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("token");
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
+import api from "../../utils/api";
 
 const Icons = {
   Logo: () => (
@@ -97,6 +91,14 @@ const Icons = {
       <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   ),
+  RefreshCw: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+      <path d="M21 12a9 9 0 00-15.5-6.36L3 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 3v5h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 12a9 9 0 0015.5 6.36L21 16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M21 21v-5h-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
   Search: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
       <circle cx="11" cy="11" r="8" stroke="currentColor" strokeWidth="1.8" />
@@ -127,6 +129,8 @@ const NAV = [
 
 const FACULTY_ACTIVE_TAB_KEY = "facultyDashboardActiveTab";
 const FACULTY_TABS = NAV.map(({ key }) => key);
+const DEFAULT_QR_COUNTDOWN = 30;
+const SESSION_DURATION_SECONDS = 5 * 60;
 
 export default function FacultyDashboard() {
   const navigate = useNavigate();
@@ -148,8 +152,83 @@ export default function FacultyDashboard() {
   const [selectedLecture, setSelectedLecture] = useState(null);
   const [qrCode, setQrCode] = useState(null);
   const [qrTimer, setQrTimer] = useState(0);
+  const [sessionTimer, setSessionTimer] = useState(0);
+  const [sessionId, setSessionId] = useState(null);
+  const [liveAttendees, setLiveAttendees] = useState([]);
+  const [sessionStatusMap, setSessionStatusMap] = useState({});
+  const [lastSessionIdMap, setLastSessionIdMap] = useState({}); // To store IDs for potential restarts
   const [noticeForm, setNoticeForm] = useState({ title: "", content: "", priority: "medium" });
   const [examForm, setExamForm] = useState({ subject: "", date: "", room: "", duration: "" });
+
+  const handleEndSession = useCallback(() => {
+    const sId = sessionId;
+    const subCode = selectedLecture?.subjectCode;
+    api.post("/faculty/end-qr-session", { sessionId: sId, subjectCode: subCode })
+      .then(() => {
+        if (subCode) {
+          setSessionStatusMap(prev => ({ ...prev, [subCode]: "completed" }));
+          setLastSessionIdMap(prev => ({ ...prev, [subCode]: sId }));
+        }
+      })
+      .catch(() => console.warn("API missing, mock end session submitted."));
+    setQrTimer(0);
+    setSessionTimer(0);
+    setSessionId(null);
+  }, [sessionId, selectedLecture]);
+
+  const handleRefreshQR = useCallback(() => {
+    if (!sessionId) return;
+    api.get(`/faculty/refresh-qr/${sessionId}`)
+      .then(res => {
+        if (res.data.success) {
+          setQrCode(res.data.qrCode);
+          setQrTimer(res.data.tokenExpiresInSeconds || DEFAULT_QR_COUNTDOWN);
+        }
+      })
+      .catch(err => {
+        if (err.response?.status === 410) {
+          handleEndSession();
+          return;
+        }
+        console.error("QR Refresh failed:", err);
+      });
+  }, [sessionId, handleEndSession]);
+
+  const handleGenerateQR = useCallback((lecture, restartOptions = null) => {
+    setSelectedLecture(lecture);
+    const payload = {
+      subjectCode: lecture.subjectCode,
+      lectureTime: `${lecture.startTime} - ${lecture.endTime}`,
+      room: lecture.room,
+      className: lecture.className || `Semester ${lecture.semester}`,
+      semester: lecture.semester,
+      clientUrl: window.location.origin,
+      ...(restartOptions?.carryForward && { carryForwardSessionId: lastSessionIdMap[lecture.subjectCode] }),
+      ...(restartOptions?.reason && { restartReason: restartOptions.reason }),
+      ...(restartOptions?.mode && { restartMode: restartOptions.mode })
+    };
+
+    api.post("/faculty/generate-qr", payload)
+      .then((res) => {
+        setQrCode(res.data.qrCode);
+        setSessionId(res.data.sessionId);
+        setQrTimer(res.data.tokenExpiresInSeconds || DEFAULT_QR_COUNTDOWN);
+        setSessionTimer(res.data.sessionExpiresInSeconds || SESSION_DURATION_SECONDS);
+        setLiveAttendees(restartOptions?.carryForward ? liveAttendees : []); 
+        setSessionStatusMap(prev => ({ ...prev, [lecture.subjectCode]: "active" }));
+      })
+      .catch((err) => {
+        console.error("QR Gen error:", err);
+        setQrCode("https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=" + lecture.subjectCode);
+        setQrTimer(DEFAULT_QR_COUNTDOWN);
+        setSessionTimer(SESSION_DURATION_SECONDS);
+      });
+  }, [liveAttendees, lastSessionIdMap]);
+
+  const logout = () => {
+    localStorage.clear();
+    navigate("/login");
+  };
 
   useEffect(() => {
     if (active === "dashboard" && !dashboardData) {
@@ -190,7 +269,11 @@ export default function FacultyDashboard() {
     } else if (active === "students" && !studentsData) {
       setLoading(true);
       api.get("/faculty/students")
-        .then((r) => setStudentsData(r.data.data || r.data))
+        .then((r) => {
+          // Backend returns { success: true, data: { students: [...], summary: {...} } }
+          const students = r.data.data?.students || r.data.students || (Array.isArray(r.data.data) ? r.data.data : []);
+          setStudentsData(students);
+        })
         .catch(() =>
           setStudentsData([
             { id: "S001", name: "Alice Johnson", branch: "CS", semester: 4, attendance: 88 },
@@ -208,43 +291,71 @@ export default function FacultyDashboard() {
   }, [active]);
 
   useEffect(() => {
+    if (active !== "generate-qr" || !sessionId || sessionTimer <= 0) {
+      return undefined;
+    }
+
+    const sessionInterval = window.setInterval(() => {
+      setSessionTimer((currentTimer) => Math.max(currentTimer - 1, 0));
+    }, 1000);
+
+    return () => window.clearInterval(sessionInterval);
+  }, [active, sessionId, sessionTimer, handleEndSession]);
+
+  useEffect(() => {
+    if (active !== "generate-qr" || !qrCode || (!sessionId && qrTimer <= 0) || qrTimer <= 0) {
+      return undefined;
+    }
+
+    const countdownInterval = window.setInterval(() => {
+      setQrTimer((currentTimer) => Math.max(currentTimer - 1, 0));
+    }, 1000);
+
+    return () => window.clearInterval(countdownInterval);
+  }, [active, qrCode, sessionId, qrTimer]);
+
+  useEffect(() => {
+    if (active === "generate-qr" && sessionId && sessionTimer === 0) {
+      handleEndSession();
+    }
+  }, [active, sessionId, sessionTimer]);
+
+  useEffect(() => {
     let interval;
-    if (qrTimer > 0) interval = setInterval(() => setQrTimer((prev) => prev - 1), 1000);
+    if (active === "generate-qr" && sessionId) {
+      interval = setInterval(() => {
+        api.get(`/faculty/live-session/${sessionId}`)
+          .then(res => {
+            if (res.data.success) {
+              setLiveAttendees(res.data.data.attendees || []);
+            }
+          })
+          .catch(err => {
+            console.warn("Polling error:", err);
+          });
+      }, 2000); 
+    }
     return () => clearInterval(interval);
-  }, [qrTimer]);
+  }, [active, sessionId]); // Stabilized dependencies
 
-  const logout = () => {
-    localStorage.clear();
-    navigate("/login");
-  };
-
-  const handleGenerateQR = (lecture) => {
-    setSelectedLecture(lecture);
-    const durationMins = 5;
-    const payload = {
-      subjectCode: lecture.subjectCode,
-      lectureTime: `${lecture.startTime} - ${lecture.endTime}`,
-      room: lecture.room,
-      className: lecture.className || `Semester ${lecture.semester}`,
-    };
-
-    api.post("/faculty/generate-qr", payload)
-      .then((res) => {
-        setQrCode(res.data.qrCode || "data:image/svg+xml;base64,...");
-        setQrTimer(durationMins * 60);
-      })
-      .catch(() => {
-        console.warn("API missing, using mock QR.");
-        setQrCode("https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=" + lecture.subjectCode);
-        setQrTimer(durationMins * 60);
-      });
-  };
-
-  const handleEndSession = () => {
-    api.post("/faculty/end-qr-session", { subjectCode: selectedLecture?.subjectCode })
-      .catch(() => console.warn("API missing, mock end session submitted."));
-    setQrTimer(0);
-  };
+  useEffect(() => {
+    if (active === "generate-qr" && sessionId && qrCode && qrTimer === 0) {
+      api.get(`/faculty/refresh-qr/${sessionId}`)
+        .then((res) => {
+          if (res.data.success) {
+            setQrCode(res.data.qrCode);
+            setQrTimer(res.data.tokenExpiresInSeconds || DEFAULT_QR_COUNTDOWN);
+          }
+        })
+        .catch((err) => {
+          if (err.response?.status === 410) {
+            handleEndSession();
+            return;
+          }
+          console.error("QR auto-refresh failed:", err);
+        });
+    }
+  }, [active, sessionId, qrCode, qrTimer, handleEndSession]);
 
   const handlePostNotice = (e) => {
     e.preventDefault();
@@ -359,8 +470,13 @@ export default function FacultyDashboard() {
               selectedLecture={selectedLecture}
               qrCode={qrCode}
               qrTimer={qrTimer}
+              sessionTimer={sessionTimer}
               handleGenerateQR={handleGenerateQR}
+              handleRefreshQR={handleRefreshQR}
               handleEndSession={handleEndSession}
+              liveAttendees={liveAttendees}
+              sessionStatusMap={sessionStatusMap}
+              sessionId={sessionId}
               Icons={Icons}
             />
           )}

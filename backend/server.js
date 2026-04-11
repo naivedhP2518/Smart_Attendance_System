@@ -24,10 +24,11 @@ app.get("/", (req, res) => {
 //   1. JWT required      — only logged-in students can mark
 //   2. studentId from JWT — student cannot fake someone else's ID
 //   3. Rotating token    — QR changes every 30s, screenshots useless
-//   4. Session age check — session can't be >10 min old
+//   4. Session age check — session can't be >5 min old
 //   5. Duplicate guard   — one mark per student per session
 const jwt = require("jsonwebtoken");
 const JWT_SECRET = process.env.JWT_SECRET || "campusconnect_secret_key_change_in_production";
+const QR_SESSION_DURATION_MS = 5 * 60 * 1000;
 
 app.post("/api/student/mark-attendance", async (req, res) => {
   try {
@@ -90,10 +91,13 @@ app.post("/api/student/mark-attendance", async (req, res) => {
       activeSessions.set(sessionId, session);
     }
 
-    // ── 5. Session age ≤ 10 min ────────────────────────────────
-    const sessionAge = (Date.now() - new Date(session.createdAt).getTime()) / 60000;
-    if (sessionAge > 10) {
-      return res.status(410).json({ success: false, message: "Session is too old. Ask faculty to start a new QR session." });
+    // ── 5. Session age ≤ 5 min ─────────────────────────────────
+    const sessionExpiresAt = session.expiresAt
+      ? new Date(session.expiresAt).getTime()
+      : new Date(session.createdAt).getTime() + QR_SESSION_DURATION_MS;
+
+    if (Date.now() > sessionExpiresAt) {
+      return res.status(410).json({ success: false, message: "Session expired. Ask faculty to start a new QR session." });
     }
 
     // ── 6. Rotating token validation (core anti-photo-proxy) ────

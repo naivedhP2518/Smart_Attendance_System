@@ -30,8 +30,8 @@ export default function FacultyStudentsTab({
             <span>Sem</span>
             <span>Attendance</span>
           </div>
-          {studentsData
-            ?.filter(
+          {Array.isArray(studentsData) && studentsData
+            .filter(
               (s) =>
                 s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
                 s.id.toLowerCase().includes(searchQuery.toLowerCase())
